@@ -21,4 +21,4 @@ hello everyone!
 hello everyone!
 hello everyone!
 hello everyone! master test!
-hello jack!
+hello jack! hot-fix test 
