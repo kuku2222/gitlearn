@@ -1,0 +1,1431 @@
+/**
+*   ************************************************************************************
+*								上海芯圣电子股份有限公司
+*								    www.holychip.cn
+*	************************************************************************************
+*	@Examle Version		V1.0.0.0
+*	@Demo 	Version		V1.0.0.0
+*	@Date				2021.07.05
+*	************************************************************************************
+*									 模块性能介绍
+*	1、MCU的定时器0，1共有四种工作方式
+*	   方式0：16位自动重装定时器/计数器
+*	   方式1：16位定时器/计数器
+*	   方式2：8位自动重装定时器/计数器
+*	   方式3：T0分成两个（TL0/TH0）独立的8位定时器/计数器（T1无此模式）
+*	************************************************************************************
+*									 应用注意事项
+*	1、方式3时T0占用T1的TR1、TF1及中断源，由于TR1被T0占用，此时需要关闭T1可将T1设为工作
+*	   方式3
+*	2、在方式0（Mode0）时THx(x = 0,1)和TLx(x = 0,1)读写操作遵循先高位后低位。并且在修改
+*	   重载数据时，低位无论有无改变，只要高位被修改，低位都必须再写入一次，方式 1、2、3
+*	   时无此要求
+*	************************************************************************************
+*  								       客户服务
+*	感谢您使用我们的单片机，若发现错误或对函数的使用存在疑问。请添加上海芯圣电子官方QQ群
+*	****************************技术支持群：201030494***********************************
+*   ************************************************************************************
+**/
+#define ALLOCATE_EXTERN
+#include "HC89S003AF4.h"
+#include "string.h"
+#include "protocol.h"
+
+#include "main.h"
+
+/***************************************************************************************
+  * @实现效果	T0定时1ms，每进一次中断，P00翻转一次
+***************************************************************************************/
+#define	SEG0	P0_7
+#define	SEG1	P0_6
+#define	SEG2	P2_2
+#define	SEG3	P2_3
+#define	SEG4	P2_4
+#define	SEG5	P2_5
+#define	SEG6	P2_6
+
+#define	COM0	P0_2
+#define	COM1	P0_1
+#define	COM2	P1_1
+#define	COM3	P2_0
+
+//u8 segdata[4];
+extern u8 lcd_dis[4];
+
+unsigned char guc_Uartflag = 0;			  //UART判断标志位
+unsigned char guc_Uartcnt = 0;		    //UART计数使用
+unsigned char guc_Uartbuf_a[11] = {0};	//用于存放接收收据
+unsigned char guc_i = 0;					        //发送数据计数	
+
+extern u8 guc_Uartbuf[3];//反馈帧
+extern PROTOCOL rx_frame;//接收帧
+extern u8 reprocess;//接收处理标志位 0：等待数据 1：开始解析
+
+extern u8 run_flag;//运行标志位，只闪烁logo
+extern u8 suspend_flag;//暂停标志位
+extern u8 suspend_deposit[4];//数据寄存
+extern u16 hear_count;//用于判断与主机的连接是否正常
+extern u8 rate_sta;//进度条状态
+u16 suspend_count = 0;//暂停闪烁计时
+u8 run_dis = 0;//运行状态，只闪烁logo
+u8 suspend_dis = 0;//暂停闪烁功能
+u8 hear_error = 0;//心跳断开，清除显示后等待下一次数据
+u8 fenhao = 0;
+
+u8 num = 0;
+u8 d_count = 0;
+unsigned int count=0;
+
+void Delay_ms(unsigned int fui_i);
+
+void SEG_Driver(u8 value,bit polar)
+{
+		if(value&0x01)SEG0 = polar;
+		else
+			SEG0 = !polar;
+		if(value&0x02)SEG1 = polar;
+		else
+			SEG1 = !polar;	
+		if(value&0x04)SEG2 = polar;
+		else
+			SEG2 = !polar;
+		if(value&0x08)SEG3 = polar;
+		else
+			SEG3 = !polar;
+		if(value&0x10)SEG4 = polar;
+		else
+			SEG4 = !polar;
+		if(value&0x20)SEG5 = polar;
+		else
+			SEG5 = !polar;
+		if(value&0x40)SEG6 = polar;
+		else
+			SEG6 = !polar;
+}
+void COM_Driver(void)
+{
+	static u8 duty_step;
+	
+	duty_step++;
+	
+	switch(duty_step)
+	{
+		case 1:
+			P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+            P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+            P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+			COMP0EN = 0x02;//EN P01 COM
+			COMP1EN = 0x02;//EN P11 COM
+			COMP2EN = 0x01;//EN P20 COM
+			P0M1 = P0M1&0xF0|0x08;//P02 SET PP
+			COM0 = 1;
+			SEG_Driver(lcd_dis[0],0);
+			
+		break;
+
+		case 2:
+			P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+		P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+		P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+			COMP0EN = 0x04;//EN P02 COM
+			COMP1EN = 0x02;//EN P11 COM
+			COMP2EN = 0x01;//EN P20 COM
+			P0M0 = P0M0&0x0F|0x80;//P01 SET PP
+			COM1 = 1;
+			SEG_Driver(lcd_dis[1],0);
+				
+		break;
+
+		case 3:
+			P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+		P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+		P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+			COMP0EN = 0x06;//EN P01 P02 COM
+			COMP2EN = 0x01;//EN P20 COM
+			P1M0 = P1M0&0x0F|0x80;//P11 SET PP
+			COM2 = 1;
+			SEG_Driver(lcd_dis[2],0);
+			
+		break;			
+
+		case 4:
+			P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+		P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+		P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+			COMP0EN = 0x06;//EN P01 P02 COM
+			COMP1EN = 0x02;//EN P11 COM
+			P2M0 = P2M0&0xF0|0x08;//P20 SET PP
+			COM3 = 1;
+			SEG_Driver(lcd_dis[3],0);
+			
+			//duty_step = 0;
+				
+		break;
+
+		case 5:
+			P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+		P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+		P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+			COMP0EN = 0x02;//EN P01 COM
+			COMP1EN = 0x02;//EN P11 COM
+			COMP2EN = 0x01;//EN P20 COM
+			P0M1 = P0M1&0xF0|0x08;//P02 SET PP
+			COM0 = 0;
+			SEG_Driver(lcd_dis[0],1);
+
+		break;
+
+		case 6:
+			P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+		P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+		P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+			COMP0EN = 0x04;//EN P02 COM
+			COMP1EN = 0x02;//EN P11 COM
+			COMP2EN = 0x01;//EN P20 COM
+			P0M0 = P0M0&0x0F|0x80;//P01 SET PP
+			COM1 = 0;
+			SEG_Driver(lcd_dis[1],1);
+				
+		break;
+
+		case 7:
+			P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+		P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+		P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+			COMP0EN = 0x06;//EN P01 P02 COM
+			COMP2EN = 0x01;//EN P20 COM
+			P1M0 = P1M0&0x0F|0x80;//P11 SET PP
+			COM2 = 0;
+			SEG_Driver(lcd_dis[2],1);
+				
+		break;			
+
+		//case 8:
+		default:
+			P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+		P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+		P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+			COMP0EN = 0x06;//EN P01 P02 COM
+			COMP1EN = 0x02;//EN P11 COM
+			P2M0 = P2M0&0xF0|0x08;//P20 SET PP
+			COM3 = 0;
+			SEG_Driver(lcd_dis[3],1);
+
+			duty_step = 0;
+		break;		
+	}
+}
+
+void COM_Driver1(void)
+{
+  static u8 duty_step;
+ 
+  duty_step++;
+  switch(duty_step)
+  {
+   case 1:
+     P0M1 = P0M1&0xF0|0x08;//P02 PP OUT
+     COM0 = 1;
+   
+     P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+     COMP0EN = 0x02;//EN  P01 COM
+   
+     P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+     COMP1EN = 0x02;//EN P11 COM
+   
+     P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+     COMP2EN = 0x01;//EN P20 COM
+   
+     SEG_Driver(lcd_dis[0],0);
+   break;
+   case 2:
+     P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+     COMP0EN = 0x04;//EN  P02 COM
+     
+     P0M0 = P0M0&0x0F|0x80;//P01 PP OUT
+     COM1 = 1;
+   
+     P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+     COMP1EN = 0x02;//EN P11 COM
+   
+     P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+     COMP2EN = 0x01;//EN P20 COM
+     
+     SEG_Driver(lcd_dis[1],0);
+    break;
+   case 3:
+     P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+     COMP0EN |= 0x04;//EN  P02 COM
+   
+     P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+     COMP0EN |= 0x02;//EN  P01 COM
+     
+     COMP1EN = 0;
+     P1M0 = P1M0&0x0F|0x80;//P11 PP OUT
+     COM2 = 1;
+     
+     P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+     COMP2EN = 0x01;//EN P20 COM
+   
+     SEG_Driver(lcd_dis[2],0);
+   break;
+   case 4:
+     P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+     COMP0EN |= 0x04;//EN  P02 COM
+   
+     P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+     COMP0EN |= 0x02;//EN  P01 COM
+   
+     P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+     COMP1EN = 0x02;//EN P11 COM
+     
+     COMP2EN = 0;//EN P20 COM
+     P2M0 = P2M0&0xF0|0x08;//P20 PP OUT
+     COM3 = 1;
+   
+     SEG_Driver(lcd_dis[3],0);
+    break;
+   case 5:
+     P0M1 = P0M1&0xF0|0x08;//P02 PP OUT
+     COM0 = 0;
+   
+     P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+     COMP0EN = 0x02;//EN  P01 COM
+   
+     P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+     COMP1EN = 0x02;//EN P11 COM
+   
+     P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+     COMP2EN = 0x01;//EN P20 COM
+   
+     SEG_Driver(lcd_dis[0],1);
+    break;
+   case 6:
+     P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+     COMP0EN = 0x04;//EN
+			
+		 P0M0 = P0M0&0x0F|0x80;//P01 PP OUT
+     COM1 = 0;
+   
+     P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+     COMP1EN = 0x02;//EN P11 COM
+   
+     P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+     COMP2EN = 0x01;//EN P20 COM
+     
+     SEG_Driver(lcd_dis[1],1);
+    break;
+	 
+	 case 7:
+     P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+     COMP0EN |= 0x04;//EN  P02 COM
+   
+     P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+     COMP0EN |= 0x02;//EN  P01 COM
+     
+     COMP1EN = 0;
+     P1M0 = P1M0&0x0F|0x80;//P11 PP OUT
+     COM2 = 0;
+     
+     P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+     COMP2EN = 0x01;//EN P20 COM
+   
+     SEG_Driver(lcd_dis[2],1);
+   break;
+   //case 8:
+	 default:
+     P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+     COMP0EN |= 0x04;//EN  P02 COM
+   
+     P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+     COMP0EN |= 0x02;//EN  P01 COM
+   
+     P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+     COMP1EN = 0x02;//EN P11 COM
+     
+     COMP2EN = 0;//EN P20 COM
+     P2M0 = P2M0&0xF0|0x08;//P20 PP OUT
+     COM3 = 0;
+   
+     SEG_Driver(lcd_dis[3],1);
+	 
+		 duty_step = 0;
+    break;
+	}
+}
+
+void TestDisplay()
+{
+#if 0
+	Display_LCD(1,0,0,0,0);
+	Delay_ms(1000);
+	Display_LCD(1,1,1,1,1);
+	Delay_ms(1000);
+	Display_LCD(1,2,2,2,2);
+	Delay_ms(1000);
+	Display_LCD(1,3,3,3,3);
+	Delay_ms(1000);
+	Display_LCD(1,4,4,4,4);
+	Delay_ms(1000);
+	Display_LCD(1,0,5,5,5);
+	Delay_ms(1000);
+	Display_LCD(1,1,6,6,6);
+	Delay_ms(1000);
+	Display_LCD(1,2,7,7,7);
+	Delay_ms(1000);
+	Display_LCD(1,3,8,8,8);
+	Delay_ms(1000);
+	Display_LCD(1,4,9,9,9);
+	Delay_ms(1000);
+#elif 1
+    Display_LCD(1,0,0,0,0);
+	Delay_ms(1000);
+	Display_LCD(1,0,1,1,1);
+	Delay_ms(1000);
+	Display_LCD(1,0,2,2,2);
+	Delay_ms(1000);
+	Display_LCD(1,0,3,3,3);
+	Delay_ms(1000);
+	Display_LCD(1,0,4,4,4);
+	Delay_ms(1000);
+	Display_LCD(1,0,5,5,5);
+	Delay_ms(1000);
+	Display_LCD(1,0,6,6,6);
+	Delay_ms(1000);
+	Display_LCD(1,0,7,7,7);
+	Delay_ms(1000);
+	Display_LCD(1,0,8,8,8);
+	Delay_ms(1000);
+	Display_LCD(1,0,9,9,9);
+	Delay_ms(1000);
+    
+    
+	Display_LCD(1,0,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,1,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,0,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,1,8,8,8);
+	Delay_ms(500);
+    
+	Display_LCD(1,2,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,1,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,2,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,1,8,8,8);
+	Delay_ms(500);
+    
+	Display_LCD(1,3,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,2,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,3,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,2,8,8,8);
+	Delay_ms(500);
+    
+	Display_LCD(1,4,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,3,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,4,8,8,8);
+	Delay_ms(500);
+	Display_LCD(1,3,8,8,8);
+	Delay_ms(500);
+    
+	Display_LCD(1,4,8,8,8);
+	Delay_ms(1000);
+    
+#endif
+}
+
+void main()
+{
+    u8 test[13] = {0x05,0x00,0x0A,0x01,0x01,0x01,0x7F,0x7F,0x7F,0x7F,0x01,0x01,0x00};
+	u8 i;
+	u8 dis;
+	dis = 0;
+/************************************系统初始化****************************************/
+	WDTCCR = 0x00;						//关闭看门狗
+		                        //本例程为方便测试关闭看门狗，实际使用中，建议客户打开看门狗，详见WDT复位例程
+	CLKSWR = 0x51;						//选择内部高频RC为系统时钟，内部高频RC 2分频，Fosc=16MHz
+	CLKDIV = 0x01;						//Fosc 1分频得到Fcpu，Fcpu=16MHz 
+/**********************************相关配置初始化**************************************/
+//	P0M1 = 0x88;							//P04 p05设置为推挽输出
+//	P2M0 = 0x38;							//P20 PP  P21 AIN
+
+/**********************************UART配置初始化**************************************/
+	P0M2 = 0x82;												//P05设置为推挽输出		//P04设置为上拉输入
+	TXD_MAP = 0x05;						          //TXD映射P05
+	RXD_MAP = 0x04;						          //RXD映射P04	
+	BRTSEL = 0X00;                      //UART1的波特率:00 T4	
+	T4CON = 0x06;						            //T4工作模式：UART1波特率发生器
+		
+	//波特率计算
+	//波特率 = 1/16 * (T4时钟源频率 / 定时器4预分频比) / (65536 - 0xFF98)
+	//       = 1/16 * ((16000000 / 1) / 104)
+	//		 = 9615.38(误差0.16%)
+
+	//波特率9600
+	//反推初值 = (65536 - ((T4时钟源频率 / 定时器4预分频比) * (1 / 16)) / 波特率)
+	//		   = (65536 - (16000000 * (1 / 16) / 9600))
+	//		   = (65536 - 104.167)
+	//         = FF98
+	
+	TH4 = 0xFF;
+	TL4 = 0x30;							             //波特率4800
+	SCON2 = 0x02;						             //8位UART，波特率可变
+	SCON = 0x10;					               //允许串行接收
+	IE |= 0X10;							             //使能串口中断
+	
+/**********************************LCD************************************************/
+	LCDCON |= 0xE0;  //使能LCD，75K电阻，1/2bias
+	
+	P1M0 = P1M0&0xF0|0x08;
+	P1_0 = 1;//关闭LED
+	
+	//COM IO NEED SET AIN,DEFAULT AIN
+	//P0M3 =
+	//P2M0 =
+	//P2M1 =
+//	COMP0EN = 0xC0;//EN P06 P07 COM
+//	COMP2EN = 0x06;//EN P21 P22 COM
+
+	P0M1 = P0M1&0xF0|0x03;//P02 SET AIN
+	P0M0 = P0M0&0x0F|0x30;//P01 SET AIN
+	P1M0 = P1M0&0x0F|0x30;//P11 SET AIN
+	P2M0 = P2M0&0xF0|0x03;//P20 SET AIN
+	
+	COMP0EN = 0x06;//EN P01 P02 COM
+	COMP1EN = 0x02;//EN P11 COM
+	COMP2EN = 0x01;//EN P20 COM
+	
+	P0M3 = 0x88;							//P06 P07设置为推挽输出
+	P2M1 = 0x88;							//P22 P23设置为推挽输出
+	P2M2 = 0x88;							//P24 P25设置为推挽输出
+	P2M3 = P2M3&0xF0|0x08;//0x38;							//P26 设置为推挽输出
+	
+	for(i=0;i<4;i++)
+	{
+		lcd_dis[i] = 0x00;//reflash lcdram
+	}
+/**********************************TIM0配置初始化**************************************/
+	TCON1 = 0x00;						  //Tx0定时器时钟为Fosc
+	TMOD = 0x00;						  //16位重装载定时器/计数器
+
+	TH0 = 0xFA;
+	TL0 = 0xCB;							  //T0定时时间1ms
+	IE |= 0x02;							  //打开T0中断
+	TCON |= 0x10;						  //使能T0
+  
+	EA = 1;								    //打开总中断
+	
+	//Display_LCD(1,4,8,8,8);
+	while(1)
+	{
+		Protocol_Analysis();
+	}
+}
+
+/***************************************************************************************
+  * @说明  	T0中断服务函数
+  *	@参数	  无
+  * @返回值 无
+  * @注		  无
+***************************************************************************************/
+void TIMER0_Rpt(void) interrupt TIMER0_VECTOR
+{ 
+		u8 sta = 0;
+	
+		//COM_Driver();
+		COM_Driver1();
+
+		if(num != 0)
+			count++;//串口通讯空闲计时
+			
+		if(hear_error == 0)
+			hear_count++;//心跳连接停止计时
+		
+		if((write_command_data.flash_state != 0) || (write_command_data.wash_state  != 0))	//闪烁状态
+		{
+			suspend_count++;//暂停闪烁计时
+
+			if(suspend_count <= flash_on)		//亮
+			{
+				Display_updata(1);
+			}
+			else if((suspend_count > flash_on) && (suspend_count < (flash_on + flash_off)))	//灭
+			{
+				Display_updata(0);
+			}
+			else
+			{
+				suspend_count = 0;
+			}
+		}
+
+		if(hear_count >= 150000)//15s
+		{
+			suspend_count = 0;
+			hear_count = 0;//计数初始化
+			hear_error = 1;//心跳连接断开
+			suspend_flag = 0;//闪烁关闭
+			run_flag = 0;//关闭logo闪烁
+			LCD_Clear();//关闭驱动，彻底清屏
+			P1_0 = 1;//关闭LED
+//			PCON |= 0x02; // 进入掉电模式
+		}
+		
+		if(count >= 20)//20ms
+		{
+			count = 0;
+			num = 0;//初始化接收
+		}
+		
+}
+
+/***************************************************************************************
+  * @说明  	UART1中断服务函数
+  *	@参数	  无
+  * @返回值 无
+  * @注		  无
+***************************************************************************************/
+void UART1_Rpt(void) interrupt UART1_VECTOR
+{
+	u8 rx_data;
+	
+	if(reprocess == 0)
+	{
+		count = 0;
+		if(SCON & 0x01)						            //判断接收中断标志位
+		{
+			rx_data = SBUF;
+			if((rx_data == 0x05 || rx_data == 0x85) && num == 0)
+			{
+				rx_frame.identity = rx_data;
+				num++;
+			}
+			else if(num == 1)
+			{
+				rx_frame.hl_add = rx_data;
+				num++;
+			}
+			else if(num == 2)
+			{
+				if((rx_data > 0) && (rx_data <= 100))
+				{
+					rx_frame.len = rx_data;
+					d_count = 0;
+					num++;
+					if(rx_frame.identity == 0x85)
+					{
+						num++;
+					}
+				}
+				else
+				{
+					num = 0;
+				}
+			}
+			else if(num == 3)
+			{
+				rx_frame.rdata[d_count++] = rx_data;
+				if(d_count >= rx_frame.len)
+				{
+					num++;
+				}
+			}
+			else if(num == 4)
+			{
+				rx_frame.hl_check_A = rx_data;
+				num++;
+			}
+			else if(num == 5)
+			{
+				rx_frame.hl_check_B = rx_data;
+				num++;
+			}
+
+			if(num == 6)
+			{
+				num = 0;
+				SCON &=~ 0x10;
+				reprocess = 1;
+				guc_Uartflag = 1;
+			}
+		}
+	}
+		SCON &=~ 0x01;			//清除接收中断标志位	
+}
+
+/**
+  * @说明  	延时函数
+  * @参数  	fui_i : 延时时间
+  * @返回值 无
+  * @注 	  Fcpu = 16MHz，fui_i = 1时，延时时间约为1Ms
+  */
+void Delay_ms(unsigned int fui_i)
+{
+    unsigned int fui_j;
+
+    for (; fui_i > 0; fui_i--)
+        for (fui_j = 1596; fui_j > 0; fui_j--)
+            ;
+}
+#include "HC89S003AF4.h"
+#include "lcd.h"
+#include "protocol.h"
+#include "string.h"
+
+
+u8 lcd_dis[4] = {0};
+extern u8 hear_error;//心跳断开，清除显示后等待下一次数据
+
+void LCD_Clear()
+{
+	u8 count;
+	for(count=0;count<4;count++)
+	{
+		lcd_dis[count] = 0;
+	}
+}
+
+void Display_updata(u8 show_state)
+{
+	SHOW_DATA show_flash_off = {0};
+  u8 i =0;
+	u8 rate_sta = 0;
+	if(write_command_data.mod_switch == 0 || hear_error == 1)		//关机状态
+	{
+		return;
+	}
+	else
+	{
+		LCD_Clear();
+		P1_0 = 0;//打开LED
+	}
+
+	memcpy((u8 *)&show_flash_off, (u8 *)&list_show, 4);
+	
+	list_show.list2.NUM2_T2 		= 0;
+	list_show.list3.NUM3_T3 		= 0;
+	list_show.list4.NUM4_T4 		= 0;
+	
+	show_flash_off.list2.NUM2_T2 	= 0;
+	show_flash_off.list3.NUM3_T3 	= 0;
+	show_flash_off.list4.NUM4_T4 	= 0;
+	
+	// if((write_command_data.run_state == 4)	|| (write_command_data.run_state == 5))
+	// {
+
+//		if((write_command_data.wash_state  == 0x01) || (write_command_data.wash_state  == 0x02))
+//		{
+//			list_show.list2.NUM2_T2 		= 1;
+//			show_flash_off.list2.NUM2_T2 	= 1;
+//		}
+//		if((write_command_data.wash_state  == 0x04) || (write_command_data.wash_state  == 0x08))
+//		{
+////			list_show.list2.NUM2_T2 		= 1;
+//			list_show.list3.NUM3_T3 		= 1;
+
+////			show_flash_off.list2.NUM2_T2 	= 1;
+//			show_flash_off.list3.NUM3_T3 	= 1;
+//		}
+//		if((write_command_data.wash_state  == 0x10) || (write_command_data.wash_state  == 0x40))
+//		{
+////			list_show.list2.NUM2_T2 		= 1;
+////			list_show.list3.NUM3_T3 		= 1;
+//			list_show.list4.NUM4_T4 		= 1;
+
+////			show_flash_off.list2.NUM2_T2 	= 1;
+////			show_flash_off.list3.NUM3_T3 	= 1;
+//			show_flash_off.list4.NUM4_T4 	= 1;
+//		}
+//        if (write_command_data.wash_state 	 == 0x80)
+//        {
+//			list_show.list2.NUM2_T2 		= 1;
+//			list_show.list3.NUM3_T3 		= 1;
+//			list_show.list4.NUM4_T4 		= 1;
+
+//			show_flash_off.list2.NUM2_T2 	= 1;
+//			show_flash_off.list3.NUM3_T3 	= 1;
+//			show_flash_off.list4.NUM4_T4 	= 1;
+//        }
+	// }
+	if ((write_command_data.wash_state & 0x03) != 0)
+	{
+		// 第一个图标亮
+		list_show.list2.NUM2_T2 = 1;
+		show_flash_off.list2.NUM2_T2 = 1;
+	} 
+	else 
+	{
+		// 第一个图标灭
+		list_show.list2.NUM2_T2 = 0;
+		show_flash_off.list2.NUM2_T2 = 0;
+	}
+
+	if ((write_command_data.wash_state & 0x0C) != 0) 
+	{
+		// 第二个图标亮
+
+		list_show.list3.NUM3_T3 		= 1;
+		show_flash_off.list3.NUM3_T3 	= 1;
+	} 
+	else 
+	{
+		// 第二个图标灭
+		list_show.list3.NUM3_T3 		= 0;
+		show_flash_off.list3.NUM3_T3 	= 0;
+	}
+
+	if ((write_command_data.wash_state & 0x30) != 0) 
+	{
+		//第三个图标亮
+		list_show.list4.NUM4_T4 		= 1;
+		show_flash_off.list4.NUM4_T4 	= 1;
+	}
+	else 
+	{
+		// 第三个图标灭
+		list_show.list4.NUM4_T4 		= 0;
+		show_flash_off.list4.NUM4_T4 	= 0;
+	}
+
+
+	if ((write_command_data.wash_state & 0x80) != 0) 
+	{
+		// 全部点亮
+		list_show.list2.NUM2_T2 		= 1;
+		list_show.list3.NUM3_T3 		= 1;
+		list_show.list4.NUM4_T4 		= 1;
+
+		show_flash_off.list2.NUM2_T2 	= 1;
+		show_flash_off.list3.NUM3_T3 	= 1;
+		show_flash_off.list4.NUM4_T4 	= 1;
+	}
+	
+	if(show_state == 1)
+	{
+		memcpy(lcd_dis, (u8 *)&list_show, 4);
+	}
+	else
+	{
+		if(write_command_data.flash_state & 0x01 != 0) 
+		{
+			show_flash_off.list4.NUM4_T1 = 0;
+		}
+		if(((write_command_data.flash_state >> 1) & 0x01) != 0)
+		{
+			show_flash_off.list1.NUM1_3A = 0;
+			show_flash_off.list2.NUM2_3B = 0;
+			show_flash_off.list3.NUM3_3C = 0;
+			show_flash_off.list4.NUM4_3D = 0;
+			show_flash_off.list3.NUM3_3E = 0;
+			show_flash_off.list1.NUM1_3F = 0;
+			show_flash_off.list2.NUM2_3G = 0;
+		}
+		if(((write_command_data.flash_state >> 2) & 0x01) != 0)
+		{
+			show_flash_off.list1.NUM1_2A = 0;
+			show_flash_off.list2.NUM2_2B = 0;
+			show_flash_off.list3.NUM3_2C = 0;
+			show_flash_off.list4.NUM4_2D = 0;
+			show_flash_off.list3.NUM3_2E = 0;
+			show_flash_off.list1.NUM1_2F = 0;
+			show_flash_off.list2.NUM2_2G = 0;
+		}
+		if(((write_command_data.flash_state >> 3) & 0x01) != 0)
+		{
+			show_flash_off.list1.NUM1_1A = 0;
+			show_flash_off.list2.NUM2_1B = 0;
+			show_flash_off.list3.NUM3_1C = 0;
+			show_flash_off.list4.NUM4_1D = 0;
+			show_flash_off.list3.NUM3_1E = 0;
+			show_flash_off.list1.NUM1_1F = 0;
+			show_flash_off.list2.NUM2_1G = 0;
+		}
+		memcpy(lcd_dis, (u8 *)&show_flash_off, 4); //灭
+	}
+    
+}
+
+
+
+#ifndef __LCD_H__
+#define __LCD_H__
+
+void Display_LCD(u8 semi,u8 rate,u8 data0,u8 data1,u8 data2);
+
+void LCD_Clear();
+
+void Display_updata(u8 show_state);
+#endif
+#include "HC89S003AF4.h"
+#include "protocol.h"
+#include "crc.h"
+#include "lcd.h"
+#include "string.h"
+
+PROTOCOL rx_frame = {0}; // 接收帧
+
+u8 guc_Uartbuf[3] = {0x05, 0x03, 0xC0}; // 反馈帧
+u8 read_Uartbuf[8] = {0}; // 反馈帧
+u8 device_ID[4] = {0x00, 0x02, 0x44, 0x1A}; // 反馈帧
+
+u8 res[130] = {0};			 // 指令接收帧
+u8 reprocess = 0;			 // 接收处理标志位 0：等待数据 1：开始解析
+u16 hear_count = 0;			 // 用于判断与主机的连接是否正常
+u8 run_flag = 0;			 // 运行标志位，只闪烁logo
+u8 suspend_flag = 0;		 // 暂停标志位
+u8 suspend_deposit[4] = {0}; // 数据寄存
+u8 sur_dis[4] = {0};		 // 图标及剩余时间显示寄存
+u8 rate_sta = 0;			 // 进度条状态
+u16 surplus = 0;			 // 剩余时间寄存
+extern u8 hear_error;		 // 心跳断开，清除显示后等待下一次数据
+
+u16 flash_on = 0;
+u16 flash_off = 0;
+MOD_WRITE_REG write_command_data = {0};
+MOD_READ_REG read_command_data = {0};
+SHOW_DATA		list_show = {0};
+
+extern unsigned char guc_Uartflag; // UART判断标志位
+extern unsigned char guc_i;		   // 发送数据计数
+
+void Check_Conversion(void)
+{
+	u8 i = 0;
+	res[0] = rx_frame.identity;
+	res[1] = rx_frame.hl_add;
+	res[2] = rx_frame.len;
+	for (i = 0; i < rx_frame.len; i++)
+	{
+		res[3 + i] = rx_frame.rdata[i];
+	}
+}
+
+void Protocol_Analysis(void)
+{
+	if (reprocess == 1) // 串口接收到了数据且符合协议
+	{
+		Command_Data_Parsing(); // 指令解析
+		reprocess = 0;
+	}
+}
+static void Data_Handle(void)
+{
+	if(write_command_data.mod_switch == 0 || write_command_data.run_state == 0)			// 关机状态
+	{
+		LCD_Clear();	/// LCD_Clear_Thorough();//关闭驱动，彻底清屏
+		P1_0 = 1;		// 关闭LED
+		return;
+		// hear_error = 1; // 心跳连接断开
+	}
+	else
+	{
+		if(write_command_data.colon_state == 0)			//不显示冒号
+		{
+			list_show.list4.NUM4_T1 = 0;
+			write_command_data.flash_state &= 0xFE;
+		}
+		else
+		{
+			list_show.list4.NUM4_T1 = 1;
+		}
+		switch(write_command_data.flash_freq)
+		{
+			case 0x00:
+				flash_on = 500;
+				flash_off = 500;
+			break;
+			case 0x01:
+				flash_on = 1200;
+				flash_off = 700;
+			break;
+			case 0x02:
+				flash_on = 300;
+				flash_off = 175;
+			break;
+			case 0x03:
+				flash_on = 200;
+				flash_off = 200;
+			break;
+			case 0x04:
+				flash_on = 800;
+				flash_off = 700;
+			break;
+			default:
+			break;
+		}
+		list_show.list1.NUM1_3A = write_command_data.num_1.BIT_A;
+		list_show.list2.NUM2_3B = write_command_data.num_1.BIT_B;
+		list_show.list3.NUM3_3C = write_command_data.num_1.BIT_C;
+		list_show.list4.NUM4_3D = write_command_data.num_1.BIT_D;
+		list_show.list3.NUM3_3E = write_command_data.num_1.BIT_E;
+		list_show.list1.NUM1_3F = write_command_data.num_1.BIT_F;
+		list_show.list2.NUM2_3G = write_command_data.num_1.BIT_G;
+		
+		list_show.list1.NUM1_2A = write_command_data.num_2.BIT_A;
+		list_show.list2.NUM2_2B = write_command_data.num_2.BIT_B;
+		list_show.list3.NUM3_2C = write_command_data.num_2.BIT_C;
+		list_show.list4.NUM4_2D = write_command_data.num_2.BIT_D;
+		list_show.list3.NUM3_2E = write_command_data.num_2.BIT_E;
+		list_show.list1.NUM1_2F = write_command_data.num_2.BIT_F;
+		list_show.list2.NUM2_2G = write_command_data.num_2.BIT_G;
+		
+		list_show.list1.NUM1_1A = write_command_data.num_3.BIT_A;
+		list_show.list2.NUM2_1B = write_command_data.num_3.BIT_B;
+		list_show.list3.NUM3_1C = write_command_data.num_3.BIT_C;
+		list_show.list4.NUM4_1D = write_command_data.num_3.BIT_D;
+		list_show.list3.NUM3_1E = write_command_data.num_3.BIT_E;
+		list_show.list1.NUM1_1F = write_command_data.num_3.BIT_F;
+		list_show.list2.NUM2_1G = write_command_data.num_3.BIT_G;
+	}
+	Display_updata(1);
+}
+
+void Command_Data_Parsing(void)
+{
+	u8 hour_array[2] = {0}; // 预约小时数寄存
+
+	u8 crc_array[2] = {0}; // 校验值寄存
+	u16 crc_value = 0;	   // 运算校验值寄存
+	if(rx_frame.identity == 0x05)
+	{
+		Check_Conversion();											   // 校验数组转换
+		crc_value = Crc_Check_Operation_Output(res, rx_frame.len + 3); // 校验运算
+	}
+	else
+	{
+        res[0] = rx_frame.identity;
+        res[1] = rx_frame.hl_add;
+        res[2] = rx_frame.len;
+		crc_value = Crc_Check_Operation_Output(res, 3); // 校验运算
+	}
+	
+    crc_array[0] = (u8)((crc_value & 0xFF00) >> 8);
+    crc_array[1] = (u8)(crc_value & 0xFF);
+		
+	if ((crc_array[0] == rx_frame.hl_check_A) && (crc_array[1] == rx_frame.hl_check_B))
+	{
+		// 校验通过
+		hear_count = 0;	
+        hear_error = 0;
+		// 校验通过
+		switch (rx_frame.hl_add)
+		{
+			case 0x00:
+			case 0x01:
+			case 0x02:
+			case 0x03:
+			case 0x04:
+			case 0x05:
+			case 0x06:
+			case 0x07:
+			case 0x08:
+			case 0x09:
+				memcpy((u8 *)(&write_command_data + rx_frame.hl_add), rx_frame.rdata, rx_frame.len);
+				Data_Handle();
+				if (guc_Uartflag)
+				{
+					//		u8 guc_i;
+					IE &= ~0x10; // 失能UART1中断
+					for (guc_i = 0; guc_i < 3; guc_i++)
+					{
+						SBUF = guc_Uartbuf[guc_i]; // 发送8位串口数据
+						while (!(SCON & 0x02))
+							;
+						SCON &= ~0x02; // 清除发送中断标志位
+					}
+					IE |= 0x10; // UART1中断使能
+					guc_Uartflag = 0;
+					SCON |= 0x10; // UART1接收使能
+				}
+				break;
+			case 0x80:
+			case 0x81:
+			case 0x82:
+			case 0x83:
+				read_Uartbuf[0] = 0x85;
+				memcpy((read_Uartbuf+1), (device_ID + rx_frame.hl_add - 0x80), rx_frame.len);
+				
+				crc_value = Crc_Check_Operation_Output(read_Uartbuf, rx_frame.len + 1);
+
+				read_Uartbuf[rx_frame.len + 1] = (u8)((crc_value & 0xFF00) >> 8);
+				read_Uartbuf[rx_frame.len + 2] = (u8)(crc_value & 0xFF);
+
+				if (guc_Uartflag)
+				{
+					//		u8 guc_i;
+					IE &= ~0x10; // 失能UART1中断
+					for (guc_i = 0; guc_i < rx_frame.len + 3; guc_i++)
+					{
+						SBUF = read_Uartbuf[guc_i]; // 发送8位串口数据
+						while (!(SCON & 0x02))
+							;
+						SCON &= ~0x02; // 清除发送中断标志位
+					}
+					IE |= 0x10; // UART1中断使能
+					guc_Uartflag = 0;
+					SCON |= 0x10; // UART1接收使能
+				}
+				break;
+			default:
+				break;
+		}
+	}
+	else
+	{
+		// P1_0 = 0;//打开LED
+		IE &= ~0x10; // 失能UART1中断
+		//			for(guc_i= 0;guc_i<3;guc_i++)
+		//			{
+		//				SBUF = guc_Uartbuf[guc_i];   //发送8位串口数据
+		//				while(!(SCON & 0x02));
+		//				SCON &=~ 0x02;			           //清除发送中断标志位
+		//			}
+		IE |= 0x10; // UART1中断使能
+		guc_Uartflag = 0;
+		SCON |= 0x10; // UART1接收使能
+	}
+}
+
+void Command_Parsing(void)
+{
+	u8 hour_array[2] = {0}; // 预约小时数寄存
+
+	u8 crc_array[2] = {0}; // 校验值寄存
+	u16 crc_value = 0;	   // 运算校验值寄存
+
+	Check_Conversion();											   // 校验数组转换
+	crc_value = Crc_Check_Operation_Output(res, rx_frame.len + 3); // 校验运算
+	crc_array[0] = (u8)((crc_value & 0xFF00) >> 8);
+	crc_array[1] = (u8)(crc_value & 0xFF);
+
+	/*	delay(30);
+		Single_USART1_TX();
+		Com_Send_buff(crc_array,2);//反馈
+		delay(30);
+		USART_SendData8(USART1,rx_frame.hl_check_A);
+		delay(30);
+		USART_SendData8(USART1,rx_frame.hl_check_B);
+		Single_USART1_RX();//用于测试，生成校验，出厂需注释
+	*/
+
+	if ((crc_array[0] == rx_frame.hl_check_A) && (crc_array[1] == rx_frame.hl_check_B))
+	{
+		// 校验通过
+		hear_count = 0;													// 心跳计时清除
+		if ((rx_frame.rdata[4] != 0x04) && (rx_frame.rdata[4] != 0x06)) // 不在需要闪烁的状态
+			suspend_flag = 0;											// 关闭闪烁
+		run_flag = 0;													// 关闭闪烁
+		switch (rx_frame.rdata[4])
+		{
+		case 0:				// 关机状态
+			LCD_Clear();	/// LCD_Clear_Thorough();//关闭驱动，彻底清屏
+			P1_0 = 1;		// 关闭LED
+			hear_error = 1; // 心跳连接断开
+			break;
+
+		case 1:						  // 选择状态，主机动作，从机关显示就好
+			if (Analytic_Operation()) // 数据运算
+			{
+				Display_LCD(1, 0xff, sur_dis[1], sur_dis[2], sur_dis[3]); // 开启显示
+			}
+			break;
+
+		case 2: // 预约运行
+			hour_array[0] = rx_frame.rdata[3] / 10;
+			hour_array[1] = rx_frame.rdata[3] % 10;
+
+			if (res[4] <= 99)
+			{
+				if (hour_array[0] == 0)
+				{
+					hour_array[0] = 0xff;								   // 不显示
+					Display_LCD(0, DELAY_ICON, hour_array[1], 0x10, 0xFF); // 末位不显示
+				}
+				else
+				{
+					Display_LCD(0, DELAY_ICON, hour_array[0], hour_array[1], 0x10); // 移位显示
+				}
+			}
+			break;
+
+		case 3:						  // 洗涤状态
+			run_flag = 1;			  // logo闪烁
+			if (Analytic_Operation()) // 数据运算
+			{
+				//				  Display_LCD(1,sur_dis[0],sur_dis[1],sur_dis[2],sur_dis[3]);//开启显示
+				suspend_deposit[0] = sur_dis[0];
+				suspend_deposit[1] = sur_dis[1];
+				suspend_deposit[2] = sur_dis[2];
+				suspend_deposit[3] = sur_dis[3];
+			}
+			break;
+
+		case 4:				  // 洗涤暂停
+			suspend_flag = 1; // 开启闪烁
+
+			if (Analytic_Operation()) // 数据运算
+			{
+				hear_count = 0; // 心跳计时清除
+				suspend_deposit[0] = sur_dis[0];
+				suspend_deposit[1] = sur_dis[1];
+				suspend_deposit[2] = sur_dis[2];
+				suspend_deposit[3] = sur_dis[3];
+			}
+			break;
+
+		case 5:							   // 结束
+			Display_LCD(1, 0xFF, 0, 0, 0); // 开启显示
+			break;
+
+		case 6:				  // 出错状态
+			suspend_flag = 2; // 开启闪烁
+			hear_count = 0;	  // 心跳计时清除
+			hour_array[0] = (rx_frame.rdata[5] & 0xF0) >> 4;
+			hour_array[1] = rx_frame.rdata[5] & 0x0F;
+
+			if (rx_frame.rdata[5] <= 9)
+			{
+				suspend_deposit[0] = 0xFF;
+				suspend_deposit[1] = 0x0E;
+				suspend_deposit[2] = 0xFF;
+				suspend_deposit[3] = rx_frame.rdata[5];
+			}
+			else
+			{
+				if (hour_array[1] == 0)
+				{
+					suspend_deposit[0] = 0xFF;
+					suspend_deposit[1] = 0x0F;
+					suspend_deposit[2] = 0xFF;
+					suspend_deposit[3] = hour_array[0];
+				}
+				else
+				{
+					suspend_deposit[0] = 0xFF;
+					suspend_deposit[1] = 0x0F;
+					suspend_deposit[2] = hour_array[0];
+					suspend_deposit[3] = hour_array[1];
+				}
+			}
+			break;
+
+		case 7:							 // 全显
+			Display_LCD(1, 12, 8, 8, 8); // 开启显示
+			break;
+
+		default:
+			// 非法
+			break;
+		}
+		/// delay(1);
+		// Com_Send_buff(feedback,3);//反馈
+		if (guc_Uartflag)
+		{
+			//		u8 guc_i;
+			IE &= ~0x10; // 失能UART1中断
+			for (guc_i = 0; guc_i < 3; guc_i++)
+			{
+				SBUF = guc_Uartbuf[guc_i]; // 发送8位串口数据
+				while (!(SCON & 0x02))
+					;
+				SCON &= ~0x02; // 清除发送中断标志位
+			}
+			IE |= 0x10; // UART1中断使能
+			guc_Uartflag = 0;
+			SCON |= 0x10; // UART1接收使能
+		}
+	}
+	else
+	{
+		IE &= ~0x10; // 失能UART1中断
+		//			for(guc_i= 0;guc_i<3;guc_i++)
+		//			{
+		//				SBUF = guc_Uartbuf[guc_i];   //发送8位串口数据
+		//				while(!(SCON & 0x02));
+		//				SCON &=~ 0x02;			           //清除发送中断标志位
+		//			}
+		IE |= 0x10; // UART1中断使能
+		guc_Uartflag = 0;
+		SCON |= 0x10; // UART1接收使能
+	}
+}
+
+u8 Analytic_Operation(void)
+{
+	u8 dis_sta = 0;
+	dis_sta = rx_frame.rdata[0];
+	if (dis_sta == 0x01)
+	{
+		sur_dis[0] = PHASE_1;
+		rate_sta = 1;
+	}
+	else if (dis_sta == 0x02)
+	{
+		sur_dis[0] = PHASE_2;
+		rate_sta = 2;
+	}
+	else if ((dis_sta == 0x04) || (dis_sta == 0x08))
+	{
+		sur_dis[0] = PHASE_3;
+		rate_sta = 3;
+	}
+	else if ((dis_sta == 0x10) || (dis_sta == 0x80))
+	{
+		sur_dis[0] = PHASE_4;
+		rate_sta = 4;
+	}
+	//	else
+	//	{
+	//		return 0;;
+	//	}
+
+	surplus = (u16)(rx_frame.rdata[1] << 8) + rx_frame.rdata[2]; // 剩余时间
+	if (surplus >= 600)
+	{
+		return 0;
+	}
+	sur_dis[1] = surplus / 60;
+	sur_dis[2] = surplus % 60 / 10;
+	sur_dis[3] = surplus % 60 % 10;
+	//	if(sur_dis[1] == 0)
+	//	{
+	//		sur_dis[1] = 0xFF;//空显
+	//		if(sur_dis[2] == 0)
+	//		{
+	//		  sur_dis[2] = 0xFF;//空显
+	//		}
+	//	}
+	return 1;
+}
+#ifndef __PROTOCOL_H__
+#define __PROTOCOL_H__
+
+
+#define  DELAY_ICON  0
+#define  WASH_ICON   1
+#define  RINSE_ICON  2
+#define  DRY_ICON    3
+
+#define  PHASE_1   1
+#define  PHASE_2   2
+#define  PHASE_3   3
+#define  PHASE_4   4
+
+typedef struct _DATA1_BIT
+{
+	u8 NUM1_RES1: 	1;
+	u8 NUM1_1F: 	1;
+	u8 NUM1_1A: 	1;
+	u8 NUM1_2F: 	1;
+	u8 NUM1_2A: 	1;
+	u8 NUM1_3F: 	1;
+	u8 NUM1_3A:	2;
+}DATA1_BIT;
+typedef struct _DATA2_BIT
+{
+	u8 NUM2_T2: 	1;
+	u8 NUM2_1G: 	1;
+	u8 NUM2_1B: 	1;
+	u8 NUM2_2G: 	1;
+	u8 NUM2_2B: 	1;
+	u8 NUM2_3G: 	1;
+	u8 NUM2_3B: 	1;
+	u8 NUM2_RES1:	1;
+}DATA2_BIT;
+typedef struct _DATA3_BIT
+{
+	u8 NUM3_T3: 	1;
+	u8 NUM3_1E: 	1;
+	u8 NUM3_1C: 	1;
+	u8 NUM3_2E: 	1;
+	u8 NUM3_2C: 	1;
+	u8 NUM3_3E: 	1;
+	u8 NUM3_3C: 	1;
+	u8 NUM3_RES1:	1;
+}DATA3_BIT;
+typedef struct _DATA4_BIT
+{
+	u8 NUM4_T4: 	1;
+	u8 NUM4_RES1: 	1;
+	u8 NUM4_1D: 	1;
+	u8 NUM4_T1: 	1;
+	u8 NUM4_2D: 	1;
+	u8 NUM4_RES2: 	1;
+	u8 NUM4_3D:		1;
+	u8 NUM4_RES3:	1;
+}DATA4_BIT;
+typedef struct _DATA_BIT
+{
+	u8 BIT_A: 	1;
+	u8 BIT_B: 	1;
+	u8 BIT_C: 	1;
+	u8 BIT_D: 	1;
+	u8 BIT_E: 	1;
+	u8 BIT_F: 	1;
+	u8 BIT_G:	1;
+	u8 BIT_RES:	1;
+}DATA_BIT;
+
+typedef struct _MOD_WRITE_REG
+{
+///////	数据解析结构体/////
+	u8  	 	  mod_switch;			//模块开关
+	u8       	wash_state ;			//洗涤阶段 
+	u8       	run_state;			//运行状态 
+	DATA_BIT    num_1;				//段码1位数字内容 
+	DATA_BIT    num_2;				//段码2位数字内容 
+	DATA_BIT    num_3;				//段码3位数字内容 
+	DATA_BIT    num_4;				//段码4位数字内容 
+	u8       	colon_state;		//段码冒号状态 
+	u8       	flash_state;		//段码闪烁状态  
+	u8       	flash_freq;			//段码闪烁频率  
+}MOD_WRITE_REG;
+
+typedef struct _MOD_READ_REG
+{
+	/////数据解析结构体/////
+	u8  	 	signal_num;			//有效信号次数
+	u8       	manufacturers_id;	//模块厂家代码 
+	u8       	mod_version_h;		//模块版本号高位 
+	u8       	mod_version_l;		//模块版本号低位  
+}MOD_READ_REG;
+
+typedef struct _SHOW_DATA
+{
+	DATA1_BIT list1;
+	DATA2_BIT list2;
+	DATA3_BIT list3;
+	DATA4_BIT list4;
+}SHOW_DATA;
+
+extern u16 flash_on;
+extern u16 flash_off;
+extern SHOW_DATA		list_show;
+extern MOD_WRITE_REG 	write_command_data;
+extern MOD_READ_REG 	read_command_data;
+
+typedef struct _TPROTOCOL
+{
+	/////数据解析结构体/////
+	u8  	 	  identity;			//协议头
+	u8       	hl_add;				//地址
+	u8       	len;				//数据长度
+	u8       	rdata[120]; 		//保留
+	u8       	hl_check_A;			//校验高
+	u8       	hl_check_B;			//校验低
+}PROTOCOL;
+void Command_Data_Parsing(void);
+void Protocol_Analysis(void);
+void Command_Parsing(void);
+u8 Analytic_Operation(void);
+
+
+#endif
